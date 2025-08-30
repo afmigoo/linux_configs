@@ -1,12 +1,12 @@
 
-[1m[33mLST[32mR [37m鵲神女核心[0m 
-L[33m* [37m KERNEL 6.1.0-33 REPLIKA-BETRIEBSYSTEM[0m 
-Generation [33m5 [37m LANDVERMESSUNGS-/SHIFF-TECHNIKER REPLIKA[0m 
+[1m[31mLST[34mR [37m鵲神女核心[0m 
+L[31m* [37m KERNEL 6.1.0-33 REPLIKA-BETRIEBSYSTEM[0m 
+Generation [31m5 [37m LANDVERMESSUNGS-/SHIFF-TECHNIKER REPLIKA[0m 
 Chipset Model: ⌜Kasasagi-i5.6300U(4)⌟[0m 
 
-Starte L[33m* [37mThinkPad X270 Debian GNU/Linux System...[0m 
+Starte L[31m* [37mThinkPad X270 Debian GNU/Linux System...[0m 
 
-MEM TEST ⌜512 R⌟ ... 16253592 kB [32mOK[0m 
+MEM TEST ⌜512 R⌟ ... 16253592 kB [34mOK[0m 
 Gestell        : LSTR (PIONIER)[0m 
 Manipulator    : D-14 Arme (5-FNG)[0m 
 Lokomotor      : D-12 Beine (KMPKT)[0m 
