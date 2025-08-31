@@ -1,0 +1,59 @@
+#!/usr/bin/bash
+
+echo '{"version":1}'
+echo '['
+neutral_color='#aaaaaa'
+charging_color='#dddd00'
+good_color='#55aa00'
+bad_color='#dd4433'
+
+while true; do
+	# Date
+	date=$(date "+%F %H:%M:%S")
+
+	# Battery charge
+	bat_data=$(acpi -b | head -n1)
+	bat_charge=$(echo $bat_data | grep -Eo '[0-9]+%')
+	bat_time_left=$(echo $bat_data | grep -Eo '[0-9]*:?[0-9]+:[0-9]+')
+	bat_charge_num=${bat_charge%\%}
+	ac=$(cat /sys/class/power_supply/AC/online)
+	if [ "$ac" -eq 1 ]; then
+	    bat_icon="🔌"
+		bat_color="$charging_color"
+	elif [ "$bat_charge_num" -le 20 ]; then
+	    bat_icon="🪫"
+		bat_color="$bad_color"
+	else
+	    bat_icon="🔋"
+		bat_color="$good_color"
+	fi
+	bat="${bat_icon}${bat_charge} ~${bat_time_left}"
+
+	# CPU
+	cpu_history=$(cut -d' ' -f1-3 /proc/loadavg)
+
+	# Volume
+	vol_status=$(amixer sget Master | grep 'Front Left:')
+	vol_level=$(echo $vol_status | awk -F'[][]' '{ print $2 }')
+	vol_muted=$(echo "$vol_status" | awk -F'[][]' '{ print $4 }')
+	if [ "$vol_muted" = "off" ]; then
+	    vol_icon="🔇"
+		vol_color="$bad_color"
+	else
+	    vol_icon="🔊"
+		vol_color="$neutral_color"
+	fi
+	volume="${vol_icon}${vol_level}"
+
+	# Status bar
+	# plain text bar
+	# echo "| ${volume} | ${cpu_history} | ${bat} | ${date} |"
+	# json bar
+	echo "[
+	     {\"full_text\": \" ${volume} \", \"color\": \"$volume_color\"},
+	     {\"full_text\": \" ${cpu_history} \", \"color\": \"$neutral_color\"},
+	     {\"full_text\": \" ${bat} \", \"color\": \"$bat_color\"},
+	     {\"full_text\": \" ${date} \", \"color\": \"$neutral_color\"}
+	],"
+	sleep 1
+done
