@@ -14,7 +14,7 @@ while true; do
 	# Battery charge
 	bat_data=$(acpi -b | head -n1)
 	bat_charge=$(echo $bat_data | grep -Eo '[0-9]+%')
-	bat_time_left=$(echo $bat_data | grep -Eo '[0-9]*:?[0-9]+:[0-9]+')
+	bat_time_left=$(echo $bat_data | grep -Eo ' [0-9]+:[0-9]+' | xargs)
 	bat_charge_num=${bat_charge%\%}
 	ac=$(cat /sys/class/power_supply/AC/online)
 	if [ "$ac" -eq 1 ]; then
@@ -31,6 +31,14 @@ while true; do
 
 	# CPU
 	cpu_history=$(cut -d' ' -f1-3 /proc/loadavg)
+
+	# Mem
+	mem_total_kb=$(grep MemTotal /proc/meminfo | grep -Eo '[0-9]+')
+	mem_total_gb=$(echo $mem_total_kb | awk '{printf "%.2f\n", ($1/1024)/1024}')
+	mem_avail_kb=$(grep MemAvailable /proc/meminfo | grep -Eo '[0-9]+')
+	mem_used_kb=$((mem_total_kb - mem_avail_kb))
+	mem_used_gb=$(echo $mem_used_kb | awk '{printf "%.2f\n", ($1/1024)/1024}')
+	mem_str="${mem_used_gb}/${mem_total_gb} GiB"
 
 	# Volume
 	vol_status=$(amixer sget Master | grep 'Front Left:')
@@ -50,8 +58,9 @@ while true; do
 	# echo "| ${volume} | ${cpu_history} | ${bat} | ${date} |"
 	# json bar
 	echo "[
-	     {\"full_text\": \" ${volume} \", \"color\": \"$volume_color\"},
+	     {\"full_text\": \" ${volume} \", \"color\": \"$vol_color\"},
 	     {\"full_text\": \" ${cpu_history} \", \"color\": \"$neutral_color\"},
+		 {\"full_text\": \" ${mem_str} \", \"color\": \"$neutral_color\"},
 	     {\"full_text\": \" ${bat} \", \"color\": \"$bat_color\"},
 	     {\"full_text\": \" ${date} \", \"color\": \"$neutral_color\"}
 	],"

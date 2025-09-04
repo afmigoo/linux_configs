@@ -1,0 +1,29 @@
+/* ~/.config/wofi/signalis.css */
+window {
+    margin: 0px;
+    border: 2px solid #ff2a4d;
+    background-color: #0a0a0a;
+}
+
+#input {
+    margin: 5px;
+    border: 1px solid #ff2a4d;
+    background-color: #0a0a0a;
+    color: #ff2a4d;
+}
+
+#inner-box {
+    margin: 5px;
+    background-color: #0a0a0a;
+}
+
+#scroll {
+    margin: 0px;
+    border: 2px solid #ff2a4d;
+}
+
+#text {
+    margin: 5px;
+    color: #ff2a4d;
+    text-shadow: 0px 0px 5px #ff2a4d55;
+}
