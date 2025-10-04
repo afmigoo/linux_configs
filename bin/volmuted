@@ -1,0 +1,4 @@
+#!/bin/bash
+
+echo "$(amixer sget Master | grep 'Front Left:' | awk -F'[][]' '{ print $4 }')"
+
