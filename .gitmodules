@@ -1,0 +1,3 @@
+[submodule "misc/guides/sway_screencapture"]
+	path = misc/guides/sway_screencapture
+	url = https://github.com/emersion/xdg-desktop-portal-wlr.wiki.git
