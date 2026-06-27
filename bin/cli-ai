@@ -84,7 +84,7 @@ stream_response() {
         check_sse_error "$data" || return 1
 
         if [[ "$VERBOSE" == true && "$THINKING" == true ]]; then
-            if jq_field "$data" '.choices[0].delta.reasoning_content // empty' reasoning; then
+            if jq_field "$data" '.choices[0].delta.reasoning_content // .choices[0].delta.reasoning // empty' reasoning; then
                 if [[ "$reasoning_started" == false ]]; then
                     echo "--- start thinking ---"
                     reasoning_started=true
@@ -363,6 +363,8 @@ AUTH_HEADER=()
 if [[ -n "$API_KEY" ]]; then
     AUTH_HEADER=(-H "Authorization: Bearer $API_KEY")
 fi
+
+verbose "$PAYLOAD"
 
 curl -sN \
     -H "Content-Type: application/json" \

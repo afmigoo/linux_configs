@@ -131,7 +131,7 @@ class TestOfflineErrors:
         assert "error:" in result.stderr.lower()
 
     def test_context_limit_exceeded(self, ai_runner):
-        large_input = ("line\n" * 501).rstrip("\n")
+        large_input = ("line\n" * 1001).rstrip("\n")
         result = ai_runner.run(
             "-e", "http://127.0.0.1:19999",
             "-m", "dummy",
