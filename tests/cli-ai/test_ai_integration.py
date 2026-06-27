@@ -103,14 +103,6 @@ class TestOfflineErrors:
         assert result.returncode != 0
         assert "CLI_AI_MODEL" in result.stderr
 
-    def test_missing_question(self, ai_runner):
-        result = ai_runner.run(
-            "-e", "http://127.0.0.1:19999",
-            "-m", "dummy",
-            track_tokens=False,
-        )
-        assert result.returncode != 0
-
     def test_missing_input_file(self, ai_runner):
         result = ai_runner.run(
             "-e", "http://127.0.0.1:19999",
@@ -174,4 +166,28 @@ class TestOfflineErrors:
         )
         assert result.returncode != 0
         assert "model" in result.stderr.lower()
+        assert "not found" in result.stderr.lower()
+
+    def test_continue_latest_no_conversations(self, ai_runner, tmp_path):
+        result = ai_runner.run(
+            "-c",
+            "-e", "http://127.0.0.1:19999",
+            "-m", "dummy",
+            MINIMAL_PROMPT,
+            env={"CLI_AI_API_KEY": "", "HOME": str(tmp_path)},
+            track_tokens=False,
+        )
+        assert result.returncode != 0
+        assert "no previous conversations" in result.stderr.lower()
+
+    def test_continue_nonexistent_hash(self, ai_runner):
+        result = ai_runner.run(
+            "-c", "deadbeef",
+            "-e", "http://127.0.0.1:19999",
+            "-m", "dummy",
+            MINIMAL_PROMPT,
+            env={"CLI_AI_API_KEY": ""},
+            track_tokens=False,
+        )
+        assert result.returncode != 0
         assert "not found" in result.stderr.lower()

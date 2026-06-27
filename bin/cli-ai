@@ -3,6 +3,7 @@ set -euo pipefail
 
 MAX_CONTEXT_LINES=500
 MAX_CONTEXT_CHARS=50000
+HISTORY_DIR="${HOME}/.cli-ai"
 DEFAULT_SYSTEM_PROMPT=$(cat <<'EOF'
 You are a terminal AI assistant.
 
@@ -76,6 +77,9 @@ stream_response() {
                 reasoning_done=true
             fi
             printf '%s' "$content"
+            if [[ -n "${RESPONSE_FILE:-}" ]]; then
+                printf '%s' "$content" >> "$RESPONSE_FILE"
+            fi
             wrote_output=true
         fi
     done
@@ -86,6 +90,9 @@ stream_response() {
 
     if $wrote_output; then
         printf '\n'
+        if [[ -n "${RESPONSE_FILE:-}" ]]; then
+            printf '\n' >> "$RESPONSE_FILE"
+        fi
     fi
 }
 
@@ -100,6 +107,7 @@ Options:
   -e, --api-endpoint <url>         API base URL (overrides CLI_AI_ENDPOINT)
   -m, --model-name <model>         Model name (overrides CLI_AI_MODEL)
   -T, --think                      Enable thinking
+  -c, --continue [hash]           Continue conversation (latest if hash omitted)
   -x, --exec <command>             Run command and include its stdout/stderr as context
       --ignore-context-limit       Disable context size limits (default: ${MAX_CONTEXT_LINES} lines / ${MAX_CONTEXT_CHARS} chars)
   -v, --verbose                    Show processing info on stderr and stream reasoning to stdout
@@ -128,6 +136,8 @@ INPUT_FILES=()
 THINKING=false
 VERBOSE=false
 ENFORCE_LIMIT=true
+CONVERSATION_HASH=""
+CONTINUE_LATEST=false
 EXEC_CMD=""
 
 verbose() {
@@ -148,6 +158,12 @@ while [[ $# -gt 0 ]]; do
             MODEL="$2"; shift 2 ;;
         -T|--think)
             THINKING=true; shift ;;
+        -c|--continue)
+            if [[ -n "${2:-}" && "$2" =~ ^[0-9a-f]{8}$ ]]; then
+                CONVERSATION_HASH="$2"; shift 2
+            else
+                CONTINUE_LATEST=true; shift
+            fi ;;
         -x|--exec)
             [[ -z "${2:-}" ]] && { echo "error: -x/--exec requires a command" >&2; exit 1; }
             EXEC_CMD="$2"; shift 2 ;;
@@ -184,12 +200,28 @@ if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
     SYSTEM_PROMPT=$(<"$SYSTEM_PROMPT_FILE")
 fi
 
-if [[ $# -eq 0 ]]; then
-    echo "error: no question provided" >&2
-    usage
+IS_CONTINUE=false
+
+if $CONTINUE_LATEST; then
+    mkdir -p "$HISTORY_DIR"
+    CONVERSATION_HASH=$(ls -t "$HISTORY_DIR"/*.json 2>/dev/null | head -1 | sed -e 's|.*/||' -e 's|\.json$||') || true
+    [[ -z "$CONVERSATION_HASH" ]] && { echo "error: no previous conversations in $HISTORY_DIR" >&2; exit 1; }
+    IS_CONTINUE=true
+elif [[ -n "$CONVERSATION_HASH" ]]; then
+    IS_CONTINUE=true
+else
+    mkdir -p "$HISTORY_DIR"
+    CONVERSATION_HASH=$(od -An -tx1 -N4 /dev/urandom | tr -d ' ')
 fi
 
-QUESTION="$*"
+HISTORY_FILE="${HISTORY_DIR}/${CONVERSATION_HASH}.json"
+$IS_CONTINUE && [[ ! -f "$HISTORY_FILE" ]] && { echo "error: conversation $CONVERSATION_HASH not found" >&2; exit 1; }
+
+if [[ $# -eq 0 ]]; then
+    QUESTION=""
+else
+    QUESTION="$*"
+fi
 
 # Validate input files exist before blocking on stdin
 for f in "${INPUT_FILES[@]}"; do
@@ -272,18 +304,30 @@ fi
 USER_MESSAGE="${CONTEXT}${QUESTION}"
 verbose "sending request to $API_URL (model: $MODEL)..."
 
-# Build JSON payload; extend with thinking fields only when enabled
+# Load conversation history when --continue is used
+HISTORY_JSON="[]"
+if $IS_CONTINUE; then
+    if [[ -f "$HISTORY_FILE" ]]; then
+        verbose "loading conversation history from $HISTORY_FILE"
+        HISTORY_JSON=$(jq -c '.' "$HISTORY_FILE")
+    else
+        verbose "no conversation history found at $HISTORY_FILE"
+    fi
+fi
+
+RESPONSE_FILE=$(mktemp)
+export RESPONSE_FILE
+
+# Build JSON payload; include conversation history and thinking fields when enabled
 if $THINKING; then
     PAYLOAD=$(jq -n \
         --arg model "$MODEL" \
         --arg system "$SYSTEM_PROMPT" \
         --arg user "$USER_MESSAGE" \
+        --argjson history "$HISTORY_JSON" \
         '{
             model: $model,
-            messages: [
-                {role: "system", content: $system},
-                {role: "user",   content: $user}
-            ],
+            messages: ([{role: "system", content: $system}] + $history + [{role: "user", content: $user}]),
             thinking: {type: "enabled"},
             stream: true
         }')
@@ -292,12 +336,10 @@ else
         --arg model "$MODEL" \
         --arg system "$SYSTEM_PROMPT" \
         --arg user "$USER_MESSAGE" \
+        --argjson history "$HISTORY_JSON" \
         '{
             model: $model,
-            messages: [
-                {role: "system", content: $system},
-                {role: "user",   content: $user}
-            ],
+            messages: ([{role: "system", content: $system}] + $history + [{role: "user", content: $user}]),
             stream: true
         }')
 fi
@@ -316,8 +358,24 @@ curl -sN \
     if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
         echo "error: API request failed — check endpoint and key" >&2
     fi
+    rm -f "$RESPONSE_FILE"
     exit 1
 }
+
+# Save conversation history
+FULL_RESPONSE=$(<"$RESPONSE_FILE")
+rm -f "$RESPONSE_FILE"
+
+if [[ -n "$FULL_RESPONSE" ]]; then
+    mkdir -p "$(dirname "$HISTORY_FILE")"
+    jq -n \
+        --arg user "$USER_MESSAGE" \
+        --arg assistant "$FULL_RESPONSE" \
+        --argjson history "$HISTORY_JSON" \
+        '$history + [{role: "user", content: $user}, {role: "assistant", content: $assistant}]' \
+        > "$HISTORY_FILE"
+    verbose "conversation saved to $HISTORY_FILE"
+fi
 
 if $VERBOSE; then
     verbose "response complete"
