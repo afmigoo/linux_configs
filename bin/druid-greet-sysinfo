@@ -1,0 +1,11 @@
+#!/bin/bash
+
+TEXT="$HOME/.local/share/druid/ascii_text.tpl"
+
+KERNEL_V=$(uname -r) \
+WM=sway WM_TEXT=$(echo $WM | awk '{ print toupper($0) }') \
+WM_VERSION=$($WM --version | grep -Eo '[0-9\.]+') \
+RAM_TOTAL=$(awk '/MemTotal/ {print $2}' /proc/meminfo) \
+LAPTOP_MODEL=$(cat /sys/devices/virtual/dmi/id/product_version) \
+envsubst < $TEXT
+

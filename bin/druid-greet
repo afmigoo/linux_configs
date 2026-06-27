@@ -1,0 +1,6 @@
+#!/bin/bash
+
+ART_FILE=$(find $HOME/.local/share/druid/art -type f -o -type l | shuf -n 1)
+
+paste -d '    ' $ART_FILE <(druid-greet-sysinfo)
+
