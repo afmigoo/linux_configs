@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEFAULT_ENDPOINT="https://api.deepseek.com/chat/completions"
+DEFAULT_MODEL="deepseek-v4-pro"
+MAX_CONTEXT_LINES=500
+MAX_CONTEXT_CHARS=50000
+DEFAULT_SYSTEM_PROMPT=$(cat <<'EOF'
+You are a CLI assistant. Write plain text for a terminal.
+
+Formatting:
+- No Markdown: no backticks, asterisks, underscores, hash marks, bullets, or numbered lists
+- Put every command or code snippet on its own line
+- Never place explanatory text on the same line as a command
+- Separate sections with one blank line
+- When asked for one command or one-liner, reply with exactly one — the simplest that works
+- Optional: one short lead-in line (under 12 words), blank line, then the command
+- Only offer multiple variants when the request is ambiguous; label each variant on its own line, blank line between variants
+
+Be concise. Omit preamble unless it prevents a mistake.
+EOF
+)
+
+count_lines() {
+    printf '%s\n' "$1" | wc -l | tr -d ' '
+}
+
+count_chars() {
+    printf '%s' "$1" | wc -c | tr -d ' '
+}
+
+truncate_context() {
+    local content="$1"
+    local lines chars truncated=false
+
+    lines=$(count_lines "$content")
+    if (( lines > MAX_CONTEXT_LINES )); then
+        content=$(printf '%s\n' "$content" | head -n "$MAX_CONTEXT_LINES")
+        truncated=true
+    fi
+
+    chars=$(count_chars "$content")
+    if (( chars > MAX_CONTEXT_CHARS )); then
+        content=$(printf '%s' "$content" | head -c "$MAX_CONTEXT_CHARS")
+        truncated=true
+    fi
+
+    if $truncated; then
+        content="[context truncated to ${MAX_CONTEXT_LINES} lines / ${MAX_CONTEXT_CHARS} chars]
+
+$content"
+    fi
+
+    printf '%s' "$content"
+}
+
+stream_response() {
+    local line data error content reasoning
+    local reasoning_started=false reasoning_done=false wrote_output=false
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" ]] && continue
+        [[ "$line" == event:* ]] && continue
+
+        if [[ "$line" != data:* ]]; then
+            if [[ "$line" == \{* ]]; then
+                error=$(jq -r '.error.message // empty' <<<"$line")
+                if [[ -n "$error" ]]; then
+                    echo "error: API returned: $error" >&2
+                    return 1
+                fi
+            fi
+            continue
+        fi
+
+        data="${line#data: }"
+        [[ "$data" == "[DONE]" ]] && break
+
+        error=$(jq -r '.error.message // empty' <<<"$data")
+        if [[ -n "$error" ]]; then
+            echo "error: API returned: $error" >&2
+            return 1
+        fi
+
+        if $VERBOSE; then
+            reasoning=$(jq -r '.choices[0].delta.reasoning_content // empty' <<<"$data")
+            if [[ -n "$reasoning" ]]; then
+                if ! $reasoning_started; then
+                    echo "--- start thinking ---"
+                    reasoning_started=true
+                fi
+                printf '%s' "$reasoning"
+                wrote_output=true
+            fi
+        fi
+
+        content=$(jq -r '.choices[0].delta.content // empty' <<<"$data")
+        if [[ -n "$content" ]]; then
+            if $VERBOSE && $reasoning_started && ! $reasoning_done; then
+                printf '\n--- end thinking ---\n'
+                reasoning_done=true
+            fi
+            printf '%s' "$content"
+            wrote_output=true
+        fi
+    done
+
+    if $VERBOSE && $reasoning_started && ! $reasoning_done; then
+        printf '\n--- end thinking ---\n'
+    fi
+
+    if $wrote_output; then
+        printf '\n'
+    fi
+}
+
+usage() {
+    cat >&2 <<EOF
+Usage: $(basename "$0") [OPTIONS] "question"
+       <stdin> | $(basename "$0") [OPTIONS] "question"
+
+Options:
+  -i <file>       Include file as context (repeatable)
+  -s <file>       Load system prompt from file
+  -e <endpoint>   API endpoint URL (default: $DEFAULT_ENDPOINT)
+  -m <model>      Model name (default: $DEFAULT_MODEL)
+  -T              Enable extended thinking (DeepSeek)
+  -F              Disable context size limits (default: ${MAX_CONTEXT_LINES} lines / ${MAX_CONTEXT_CHARS} chars)
+  -v              Verbose: show processing info on stderr and stream reasoning to stdout
+  -h              Show this help
+
+Environment:
+  CLI_API_KEY     API key (required)
+
+Examples:
+  cat app.log | tail -n10 | $(basename "$0") "what is the most common status code?"
+  $(basename "$0") "gimme a command to get unique status codes from nginx log"
+  $(basename "$0") -i app.conf -i db.conf "how does this work?"
+  $(basename "$0") -T "explain this error in depth"
+EOF
+    exit 1
+}
+
+ENDPOINT="$DEFAULT_ENDPOINT"
+MODEL="$DEFAULT_MODEL"
+SYSTEM_PROMPT="$DEFAULT_SYSTEM_PROMPT"
+SYSTEM_PROMPT_FILE=""
+INPUT_FILES=()
+THINKING=false
+VERBOSE=false
+ENFORCE_LIMIT=true
+
+verbose() {
+    if $VERBOSE; then
+        echo "$*" >&2
+    fi
+}
+
+while getopts ":i:s:e:m:TFvh" opt; do
+    case $opt in
+        i) INPUT_FILES+=("$OPTARG") ;;
+        s) SYSTEM_PROMPT_FILE="$OPTARG" ;;
+        e) ENDPOINT="$OPTARG" ;;
+        m) MODEL="$OPTARG" ;;
+        T) THINKING=true ;;
+        F) ENFORCE_LIMIT=false ;;
+        v) VERBOSE=true ;;
+        h) usage ;;
+        :) echo "error: option -$OPTARG requires an argument" >&2; exit 1 ;;
+        \?) echo "error: unknown option -$OPTARG" >&2; usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+if [[ -z "${CLI_API_KEY:-}" ]]; then
+    echo "error: CLI_API_KEY environment variable is not set or empty" >&2
+    exit 1
+fi
+
+if [[ -n "$SYSTEM_PROMPT_FILE" ]]; then
+    [[ -f "$SYSTEM_PROMPT_FILE" ]] || { echo "error: system prompt file not found: $SYSTEM_PROMPT_FILE" >&2; exit 1; }
+    SYSTEM_PROMPT=$(<"$SYSTEM_PROMPT_FILE")
+fi
+
+if [[ $# -eq 0 ]]; then
+    echo "error: no question provided" >&2
+    usage
+fi
+
+QUESTION="$*"
+
+# Validate input files exist before blocking on stdin
+for f in "${INPUT_FILES[@]}"; do
+    [[ -f "$f" ]] || { echo "error: input file not found: $f" >&2; exit 1; }
+done
+
+CONTEXT=""
+STDIN_CONTENT=""
+
+# Read piped stdin
+if [[ ! -t 0 ]]; then
+    verbose "reading stdin..."
+    STDIN_CONTENT=$(cat)
+    if [[ -n "$STDIN_CONTENT" ]]; then
+        verbose "stdin: $(count_lines "$STDIN_CONTENT") lines, $(count_chars "$STDIN_CONTENT") chars"
+        CONTEXT+="<stdin>
+$STDIN_CONTENT
+</stdin>
+
+"
+    else
+        verbose "stdin: empty"
+    fi
+else
+    verbose "stdin: none"
+fi
+
+# Read -i input files
+for f in "${INPUT_FILES[@]}"; do
+    verbose "reading file: $f"
+    file_content=$(<"$f")
+    verbose "file $f: $(count_lines "$file_content") lines, $(count_chars "$file_content") chars"
+    CONTEXT+="<file name=\"$f\">
+$file_content
+</file>
+
+"
+done
+
+if [[ -n "$CONTEXT" ]]; then
+    context_lines=$(count_lines "$CONTEXT")
+    context_chars=$(count_chars "$CONTEXT")
+    verbose "total context before limit: ${context_lines} lines, ${context_chars} chars"
+
+    if $ENFORCE_LIMIT && (( context_lines > MAX_CONTEXT_LINES || context_chars > MAX_CONTEXT_CHARS )); then
+        verbose "context exceeds limit (${MAX_CONTEXT_LINES} lines / ${MAX_CONTEXT_CHARS} chars), truncating..."
+        CONTEXT=$(truncate_context "$CONTEXT")
+        verbose "total context after limit: $(count_lines "$CONTEXT") lines, $(count_chars "$CONTEXT") chars"
+    fi
+else
+    verbose "total context: none"
+fi
+
+USER_MESSAGE="${CONTEXT}${QUESTION}"
+verbose "sending request to $ENDPOINT (model: $MODEL)..."
+
+# Build JSON payload; extend with thinking fields only when enabled
+if $THINKING; then
+    PAYLOAD=$(jq -n \
+        --arg model "$MODEL" \
+        --arg system "$SYSTEM_PROMPT" \
+        --arg user "$USER_MESSAGE" \
+        '{
+            model: $model,
+            messages: [
+                {role: "system", content: $system},
+                {role: "user",   content: $user}
+            ],
+            thinking: {type: "enabled"},
+            reasoning_effort: "high",
+            stream: true
+        }')
+else
+    PAYLOAD=$(jq -n \
+        --arg model "$MODEL" \
+        --arg system "$SYSTEM_PROMPT" \
+        --arg user "$USER_MESSAGE" \
+        '{
+            model: $model,
+            messages: [
+                {role: "system", content: $system},
+                {role: "user",   content: $user}
+            ],
+            thinking: {type: "disabled"},
+            stream: true
+        }')
+fi
+
+curl -sfN \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $CLI_API_KEY" \
+    -d "$PAYLOAD" \
+    "$ENDPOINT" | stream_response || {
+    if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+        echo "error: API request failed — check endpoint and key" >&2
+    fi
+    exit 1
+}
+
+if $VERBOSE; then
+    verbose "response complete"
+fi
