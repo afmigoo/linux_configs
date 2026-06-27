@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MAX_CONTEXT_LINES=500
-MAX_CONTEXT_CHARS=50000
+MAX_CONTEXT_LINES=1000
+MAX_CONTEXT_CHARS=100000
 HISTORY_DIR="${HOME}/.cli-ai"
 DEFAULT_SYSTEM_PROMPT=$(cat <<'EOF'
 You are a terminal AI assistant.
@@ -20,15 +20,50 @@ EOF
 
 count_lines() {
     [[ -z "$1" ]] && { echo 0; return; }
-    printf '%s\n' "$1" | wc -l | tr -d ' '
+    local count=0 line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        ((count++))
+    done <<<"$1"
+    echo "$count"
 }
 
 count_chars() {
     printf '%s' "$1" | wc -c | tr -d ' '
 }
 
+# Sets the named variable to the jq result; returns 0 if non-empty, 1 if empty.
+jq_field() {
+    local json="$1" filter="$2" sentinel=$'\034' raw
+    raw=$(jq -rj "$filter" <<<"$json"; printf '%s' "$sentinel") || return 1
+    raw="${raw%"$sentinel"}"
+    if [[ -n "$raw" ]]; then
+        printf -v "$3" '%s' "$raw"
+        return 0
+    fi
+    return 1
+}
+
+check_sse_error() {
+    local json="$1" error
+    if jq_field "$json" '.error.message // empty' error; then
+        echo "error: API returned: $error" >&2
+        return 1
+    fi
+    return 0
+}
+
+latest_conversation_hash() {
+    local dir="$1" latest="" f
+    while IFS= read -r -d '' f; do
+        [[ -z "$latest" || "$f" -nt "$latest" ]] && latest="$f"
+    done < <(find "$dir" -maxdepth 1 -name '*.json' -type f -print0 2>/dev/null)
+    [[ -n "$latest" ]] || return 1
+    basename "$latest" .json
+}
+
 stream_response() {
-    local line data error content reasoning
+    local response_file="${1:-}"
+    local line data content reasoning
     local reasoning_started=false reasoning_done=false wrote_output=false
 
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -37,11 +72,7 @@ stream_response() {
 
         if [[ "$line" != data:* ]]; then
             if [[ "$line" == \{* ]]; then
-                error=$(jq -rj '.error.message // empty' <<<"$line"; printf 'x')
-                if [[ "$error" != "x" ]]; then
-                    echo "error: API returned: ${error%x}" >&2
-                    return 1
-                fi
+                check_sse_error "$line" || return 1
             fi
             continue
         fi
@@ -50,17 +81,11 @@ stream_response() {
         data="${data# }"
         [[ "$data" == "[DONE]" ]] && break
 
-        error=$(jq -rj '.error.message // empty' <<<"$data"; printf 'x')
-        if [[ "$error" != "x" ]]; then
-            echo "error: API returned: ${error%x}" >&2
-            return 1
-        fi
+        check_sse_error "$data" || return 1
 
-        if $VERBOSE; then
-            reasoning=$(jq -rj '.choices[0].delta.reasoning_content // empty' <<<"$data"; printf 'x')
-            if [[ "$reasoning" != "x" ]]; then
-                reasoning="${reasoning%x}"
-                if ! $reasoning_started; then
+        if [[ "$VERBOSE" == true && "$THINKING" == true ]]; then
+            if jq_field "$data" '.choices[0].delta.reasoning_content // empty' reasoning; then
+                if [[ "$reasoning_started" == false ]]; then
                     echo "--- start thinking ---"
                     reasoning_started=true
                 fi
@@ -69,29 +94,27 @@ stream_response() {
             fi
         fi
 
-        content=$(jq -rj '.choices[0].delta.content // empty' <<<"$data"; printf 'x')
-        if [[ "$content" != "x" ]]; then
-            content="${content%x}"
-            if $VERBOSE && $reasoning_started && ! $reasoning_done; then
+        if jq_field "$data" '.choices[0].delta.content // empty' content; then
+            if [[ "$VERBOSE" == true && "$reasoning_started" == true && "$reasoning_done" == false ]]; then
                 printf '\n--- end thinking ---\n'
                 reasoning_done=true
             fi
             printf '%s' "$content"
-            if [[ -n "${RESPONSE_FILE:-}" ]]; then
-                printf '%s' "$content" >> "$RESPONSE_FILE"
+            if [[ -n "$response_file" ]]; then
+                printf '%s' "$content" >> "$response_file"
             fi
             wrote_output=true
         fi
     done
 
-    if $VERBOSE && $reasoning_started && ! $reasoning_done; then
+    if [[ "$VERBOSE" == true && "$reasoning_started" == true && "$reasoning_done" == false ]]; then
         printf '\n--- end thinking ---\n'
     fi
 
-    if $wrote_output; then
+    if [[ "$wrote_output" == true ]]; then
         printf '\n'
-        if [[ -n "${RESPONSE_FILE:-}" ]]; then
-            printf '\n' >> "$RESPONSE_FILE"
+        if [[ -n "$response_file" ]]; then
+            printf '\n' >> "$response_file"
         fi
     fi
 }
@@ -110,7 +133,7 @@ Options:
   -c, --continue [hash]           Continue conversation (latest if hash omitted)
   -x, --exec <command>             Run command and include its stdout/stderr as context
       --ignore-context-limit       Disable context size limits (default: ${MAX_CONTEXT_LINES} lines / ${MAX_CONTEXT_CHARS} chars)
-  -v, --verbose                    Show processing info on stderr and stream reasoning to stdout
+  -v, --verbose                    Show processing info on stderr; with -T, stream reasoning to stdout
   -h, --help                       Show this help
 
 Environment:
@@ -124,7 +147,7 @@ Examples:
   $(basename "$0") -i app.conf -i db.conf "how does this work?"
   $(basename "$0") -T "explain this error in depth"
 EOF
-    exit 1
+    exit 0
 }
 
 ENDPOINT="${CLI_AI_ENDPOINT:-}"
@@ -141,7 +164,7 @@ CONTINUE_LATEST=false
 EXEC_CMD=""
 
 verbose() {
-    if $VERBOSE; then
+    if [[ "$VERBOSE" == true ]]; then
         echo "$*" >&2
     fi
 }
@@ -159,10 +182,13 @@ while [[ $# -gt 0 ]]; do
         -T|--think)
             THINKING=true; shift ;;
         -c|--continue)
-            if [[ -n "${2:-}" && "$2" =~ ^[0-9a-f]{8}$ ]]; then
+            if [[ -z "${2:-}" ]] || [[ "$2" == -* ]]; then
+                CONTINUE_LATEST=true; shift
+            elif [[ "$2" =~ ^[0-9a-f]{8}$ ]]; then
                 CONVERSATION_HASH="$2"; shift 2
             else
-                CONTINUE_LATEST=true; shift
+                echo "error: invalid conversation hash (expected 8 hex chars): $2" >&2
+                exit 1
             fi ;;
         -x|--exec)
             [[ -z "${2:-}" ]] && { echo "error: -x/--exec requires a command" >&2; exit 1; }
@@ -172,7 +198,7 @@ while [[ $# -gt 0 ]]; do
         -v|--verbose)
             VERBOSE=true; shift ;;
         -h|--help)
-            usage; exit 0 ;;
+            usage 0 ;;
         --)
             shift; break ;;
         -*)
@@ -202,9 +228,9 @@ fi
 
 IS_CONTINUE=false
 
-if $CONTINUE_LATEST; then
+if [[ "$CONTINUE_LATEST" == true ]]; then
     mkdir -p "$HISTORY_DIR"
-    CONVERSATION_HASH=$(ls -t "$HISTORY_DIR"/*.json 2>/dev/null | head -1 | sed -e 's|.*/||' -e 's|\.json$||') || true
+    CONVERSATION_HASH=$(latest_conversation_hash "$HISTORY_DIR") || true
     [[ -z "$CONVERSATION_HASH" ]] && { echo "error: no previous conversations in $HISTORY_DIR" >&2; exit 1; }
     IS_CONTINUE=true
 elif [[ -n "$CONVERSATION_HASH" ]]; then
@@ -215,7 +241,7 @@ else
 fi
 
 HISTORY_FILE="${HISTORY_DIR}/${CONVERSATION_HASH}.json"
-$IS_CONTINUE && [[ ! -f "$HISTORY_FILE" ]] && { echo "error: conversation $CONVERSATION_HASH not found" >&2; exit 1; }
+[[ "$IS_CONTINUE" == true ]] && [[ ! -f "$HISTORY_FILE" ]] && { echo "error: conversation $CONVERSATION_HASH not found" >&2; exit 1; }
 
 if [[ $# -eq 0 ]]; then
     QUESTION=""
@@ -285,7 +311,7 @@ if [[ -n "$EXEC_CMD" ]]; then
     if [[ "$exec_exit" -ne 0 ]]; then
         CONTEXT+="<exit-code>${exec_exit}</exit-code>"$'\n'
     fi
-    CONTEXT+="<source-command>\n${EXEC_CMD}\n</source-command>"$'\n'
+    CONTEXT+="<source-command>"$'\n'"${EXEC_CMD}"$'\n'"</source-command>"$'\n'
 fi
 
 if [[ -n "$CONTEXT" ]]; then
@@ -293,7 +319,7 @@ if [[ -n "$CONTEXT" ]]; then
     context_chars=$(count_chars "$CONTEXT")
     verbose "total context before limit: ${context_lines} lines, ${context_chars} chars"
 
-    if $ENFORCE_LIMIT && (( context_lines > MAX_CONTEXT_LINES || context_chars > MAX_CONTEXT_CHARS )); then
+    if [[ "$ENFORCE_LIMIT" == true ]] && (( context_lines > MAX_CONTEXT_LINES || context_chars > MAX_CONTEXT_CHARS )); then
         echo "error: context exceeds limit (${context_lines} lines / ${context_chars} chars; max is ${MAX_CONTEXT_LINES} lines / ${MAX_CONTEXT_CHARS} chars)" >&2
         exit 1
     fi
@@ -306,43 +332,31 @@ verbose "sending request to $API_URL (model: $MODEL)..."
 
 # Load conversation history when --continue is used
 HISTORY_JSON="[]"
-if $IS_CONTINUE; then
+if [[ "$IS_CONTINUE" == true ]]; then
     if [[ -f "$HISTORY_FILE" ]]; then
         verbose "loading conversation history from $HISTORY_FILE"
         HISTORY_JSON=$(jq -c '.' "$HISTORY_FILE")
+        echo "continuing $CONVERSATION_HASH" >&2
     else
         verbose "no conversation history found at $HISTORY_FILE"
     fi
 fi
 
 RESPONSE_FILE=$(mktemp)
-export RESPONSE_FILE
+trap 'rm -f "$RESPONSE_FILE"' EXIT
 
 # Build JSON payload; include conversation history and thinking fields when enabled
-if $THINKING; then
-    PAYLOAD=$(jq -n \
-        --arg model "$MODEL" \
-        --arg system "$SYSTEM_PROMPT" \
-        --arg user "$USER_MESSAGE" \
-        --argjson history "$HISTORY_JSON" \
-        '{
-            model: $model,
-            messages: ([{role: "system", content: $system}] + $history + [{role: "user", content: $user}]),
-            thinking: {type: "enabled"},
-            stream: true
-        }')
-else
-    PAYLOAD=$(jq -n \
-        --arg model "$MODEL" \
-        --arg system "$SYSTEM_PROMPT" \
-        --arg user "$USER_MESSAGE" \
-        --argjson history "$HISTORY_JSON" \
-        '{
-            model: $model,
-            messages: ([{role: "system", content: $system}] + $history + [{role: "user", content: $user}]),
-            stream: true
-        }')
-fi
+PAYLOAD=$(jq -n \
+    --arg model "$MODEL" \
+    --arg system "$SYSTEM_PROMPT" \
+    --arg user "$USER_MESSAGE" \
+    --argjson history "$HISTORY_JSON" \
+    --argjson thinking "$( [[ "$THINKING" == true ]] && echo "true" || echo "false" )" \
+    '{
+        model: $model,
+        messages: ([{role: "system", content: $system}] + $history + [{role: "user", content: $user}]),
+        stream: true
+    } + if $thinking then {thinking: {type: "enabled"}} else {} end')
 
 # Build auth header array (omitted when no key set)
 AUTH_HEADER=()
@@ -354,17 +368,15 @@ curl -sN \
     -H "Content-Type: application/json" \
     "${AUTH_HEADER[@]}" \
     -d "$PAYLOAD" \
-    "$API_URL" | stream_response || {
+    "$API_URL" | stream_response "$RESPONSE_FILE" || {
     if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
         echo "error: API request failed — check endpoint and key" >&2
     fi
-    rm -f "$RESPONSE_FILE"
     exit 1
 }
 
 # Save conversation history
 FULL_RESPONSE=$(<"$RESPONSE_FILE")
-rm -f "$RESPONSE_FILE"
 
 if [[ -n "$FULL_RESPONSE" ]]; then
     mkdir -p "$(dirname "$HISTORY_FILE")"
@@ -375,8 +387,9 @@ if [[ -n "$FULL_RESPONSE" ]]; then
         '$history + [{role: "user", content: $user}, {role: "assistant", content: $assistant}]' \
         > "$HISTORY_FILE"
     verbose "conversation saved to $HISTORY_FILE"
+    echo "continue with flag: \`-c $CONVERSATION_HASH\`" >&2
 fi
 
-if $VERBOSE; then
+if [[ "$VERBOSE" == true ]]; then
     verbose "response complete"
 fi

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 AI_SCRIPT = REPO_ROOT / "bin" / "cli-ai"
-ENV_FILE = REPO_ROOT / "bin" / ".env"
 
 MAX_TOKENS_PER_TEST = 5_000
 MAX_TOKENS_SUITE = 500_000
@@ -20,19 +19,6 @@ MINIMAL_PROMPT = "Reply with the single word OK"
 
 def estimate_tokens(*parts: str) -> int:
     return sum(max(1, len(p) // 4) for p in parts if p)
-
-
-def load_env_file(path: Path) -> dict[str, str]:
-    env: dict[str, str] = {}
-    if not path.is_file():
-        return env
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        env[key.strip()] = value.strip()
-    return env
 
 
 @dataclass
@@ -63,7 +49,6 @@ class AiRunResult:
 @dataclass
 class AiRunner:
     script: Path
-    base_env: dict[str, str]
     token_budget: TokenBudget
     track_tokens: bool = True
 
@@ -74,7 +59,7 @@ class AiRunner:
         env: dict[str, str] | None = None,
         track_tokens: bool | None = None,
     ) -> AiRunResult:
-        run_env = {**os.environ, **self.base_env}
+        run_env = {**os.environ}
         if env:
             run_env.update(env)
 
@@ -102,11 +87,10 @@ class AiRunner:
 
 @pytest.fixture(scope="session")
 def live_env() -> dict[str, str | None]:
-    env = load_env_file(ENV_FILE)
     return {
-        "endpoint": env.get("CLI_AI_ENDPOINT") or os.environ.get("CLI_AI_ENDPOINT"),
-        "model": env.get("CLI_AI_MODEL") or os.environ.get("CLI_AI_MODEL"),
-        "api_key": env.get("CLI_AI_API_KEY") or os.environ.get("CLI_AI_API_KEY"),
+        "endpoint": os.environ.get("CLI_AI_ENDPOINT"),
+        "model": os.environ.get("CLI_AI_MODEL"),
+        "api_key": os.environ.get("CLI_AI_API_KEY"),
     }
 
 
@@ -119,8 +103,7 @@ def token_budget() -> TokenBudget:
 def ai_runner(token_budget: TokenBudget) -> AiRunner:
     if not AI_SCRIPT.is_file():
         pytest.fail(f"ai script not found: {AI_SCRIPT}")
-    base_env = load_env_file(ENV_FILE)
-    return AiRunner(script=AI_SCRIPT, base_env=base_env, token_budget=token_budget)
+    return AiRunner(script=AI_SCRIPT, token_budget=token_budget)
 
 
 @pytest.fixture

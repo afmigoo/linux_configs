@@ -22,9 +22,10 @@ END_THINKING = "--- end thinking ---"
 
 @pytest.fixture
 def require_live_env(live_env: dict[str, str | None]):
-    missing = [k for k, v in live_env.items() if not v]
+    required = ("endpoint", "model")
+    missing = [k for k in required if not live_env.get(k)]
     if missing:
-        pytest.skip(f"missing in bin/.env: {', '.join(missing)}")
+        pytest.skip(f"missing in environment (source your env file before running tests): {', '.join(missing)}")
 
 
 class TestLiveApi:
@@ -84,6 +85,11 @@ class TestLiveApi:
 
 
 class TestOfflineErrors:
+    def test_help_exits_zero(self, ai_runner):
+        result = ai_runner.run("-h", track_tokens=False)
+        assert result.returncode == 0
+        assert "Usage:" in result.stderr
+
     def test_missing_endpoint(self, ai_runner):
         result = ai_runner.run(
             MINIMAL_PROMPT,
@@ -191,3 +197,15 @@ class TestOfflineErrors:
         )
         assert result.returncode != 0
         assert "not found" in result.stderr.lower()
+
+    def test_continue_invalid_hash(self, ai_runner):
+        result = ai_runner.run(
+            "-c", "notahex00",
+            "-e", "http://127.0.0.1:19999",
+            "-m", "dummy",
+            MINIMAL_PROMPT,
+            env={"CLI_AI_API_KEY": ""},
+            track_tokens=False,
+        )
+        assert result.returncode != 0
+        assert "invalid conversation hash" in result.stderr.lower()
