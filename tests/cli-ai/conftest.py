@@ -77,8 +77,6 @@ class AiRunner:
         run_env = {**os.environ, **self.base_env}
         if env:
             run_env.update(env)
-        if "CLI_API_KEY" in run_env and run_env["CLI_API_KEY"] == "":
-            run_env.pop("CLI_API_KEY", None)
 
         prompt = args[-1] if args else ""
         should_track = self.track_tokens if track_tokens is None else track_tokens
@@ -103,9 +101,13 @@ class AiRunner:
 
 
 @pytest.fixture(scope="session")
-def api_key() -> str | None:
+def live_env() -> dict[str, str | None]:
     env = load_env_file(ENV_FILE)
-    return env.get("CLI_API_KEY") or os.environ.get("CLI_API_KEY")
+    return {
+        "endpoint": env.get("CLI_AI_ENDPOINT") or os.environ.get("CLI_AI_ENDPOINT"),
+        "model": env.get("CLI_AI_MODEL") or os.environ.get("CLI_AI_MODEL"),
+        "api_key": env.get("CLI_AI_API_KEY") or os.environ.get("CLI_AI_API_KEY"),
+    }
 
 
 @pytest.fixture(scope="session")

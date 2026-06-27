@@ -1,57 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEFAULT_ENDPOINT="https://api.deepseek.com/chat/completions"
-DEFAULT_MODEL="deepseek-v4-pro"
 MAX_CONTEXT_LINES=500
 MAX_CONTEXT_CHARS=50000
 DEFAULT_SYSTEM_PROMPT=$(cat <<'EOF'
-You are a CLI assistant. Write plain text for a terminal.
+You are a terminal AI assistant.
 
 Formatting:
-- No Markdown: no backticks, asterisks, underscores, hash marks, bullets, or numbered lists
-- Put every command or code snippet on its own line
-- Never place explanatory text on the same line as a command
-- Separate sections with one blank line
-- When asked for one command or one-liner, reply with exactly one — the simplest that works
-- Optional: one short lead-in line (under 12 words), blank line, then the command
-- Only offer multiple variants when the request is ambiguous; label each variant on its own line, blank line between variants
+- Lists are fine. No other markdown unless it helps readability.
+- A single command or one-liner must be output as plain text (no code block, no backticks).
+- When asked for one command, reply with exactly one — the simplest that works.
+- Optionally precede a command with one short lead-in line, then a blank line, then the command.
+- Multi-line snippets may use code blocks.
 
 Be concise. Omit preamble unless it prevents a mistake.
 EOF
 )
 
 count_lines() {
+    [[ -z "$1" ]] && { echo 0; return; }
     printf '%s\n' "$1" | wc -l | tr -d ' '
 }
 
 count_chars() {
     printf '%s' "$1" | wc -c | tr -d ' '
-}
-
-truncate_context() {
-    local content="$1"
-    local lines chars truncated=false
-
-    lines=$(count_lines "$content")
-    if (( lines > MAX_CONTEXT_LINES )); then
-        content=$(printf '%s\n' "$content" | head -n "$MAX_CONTEXT_LINES")
-        truncated=true
-    fi
-
-    chars=$(count_chars "$content")
-    if (( chars > MAX_CONTEXT_CHARS )); then
-        content=$(printf '%s' "$content" | head -c "$MAX_CONTEXT_CHARS")
-        truncated=true
-    fi
-
-    if $truncated; then
-        content="[context truncated to ${MAX_CONTEXT_LINES} lines / ${MAX_CONTEXT_CHARS} chars]
-
-$content"
-    fi
-
-    printf '%s' "$content"
 }
 
 stream_response() {
@@ -64,27 +36,29 @@ stream_response() {
 
         if [[ "$line" != data:* ]]; then
             if [[ "$line" == \{* ]]; then
-                error=$(jq -r '.error.message // empty' <<<"$line")
-                if [[ -n "$error" ]]; then
-                    echo "error: API returned: $error" >&2
+                error=$(jq -rj '.error.message // empty' <<<"$line"; printf 'x')
+                if [[ "$error" != "x" ]]; then
+                    echo "error: API returned: ${error%x}" >&2
                     return 1
                 fi
             fi
             continue
         fi
 
-        data="${line#data: }"
+        data="${line#data:}"
+        data="${data# }"
         [[ "$data" == "[DONE]" ]] && break
 
-        error=$(jq -r '.error.message // empty' <<<"$data")
-        if [[ -n "$error" ]]; then
-            echo "error: API returned: $error" >&2
+        error=$(jq -rj '.error.message // empty' <<<"$data"; printf 'x')
+        if [[ "$error" != "x" ]]; then
+            echo "error: API returned: ${error%x}" >&2
             return 1
         fi
 
         if $VERBOSE; then
-            reasoning=$(jq -r '.choices[0].delta.reasoning_content // empty' <<<"$data")
-            if [[ -n "$reasoning" ]]; then
+            reasoning=$(jq -rj '.choices[0].delta.reasoning_content // empty' <<<"$data"; printf 'x')
+            if [[ "$reasoning" != "x" ]]; then
+                reasoning="${reasoning%x}"
                 if ! $reasoning_started; then
                     echo "--- start thinking ---"
                     reasoning_started=true
@@ -94,8 +68,9 @@ stream_response() {
             fi
         fi
 
-        content=$(jq -r '.choices[0].delta.content // empty' <<<"$data")
-        if [[ -n "$content" ]]; then
+        content=$(jq -rj '.choices[0].delta.content // empty' <<<"$data"; printf 'x')
+        if [[ "$content" != "x" ]]; then
+            content="${content%x}"
             if $VERBOSE && $reasoning_started && ! $reasoning_done; then
                 printf '\n--- end thinking ---\n'
                 reasoning_done=true
@@ -120,17 +95,20 @@ Usage: $(basename "$0") [OPTIONS] "question"
        <stdin> | $(basename "$0") [OPTIONS] "question"
 
 Options:
-  -i <file>       Include file as context (repeatable)
-  -s <file>       Load system prompt from file
-  -e <endpoint>   API endpoint URL (default: $DEFAULT_ENDPOINT)
-  -m <model>      Model name (default: $DEFAULT_MODEL)
-  -T              Enable extended thinking (DeepSeek)
-  -F              Disable context size limits (default: ${MAX_CONTEXT_LINES} lines / ${MAX_CONTEXT_CHARS} chars)
-  -v              Verbose: show processing info on stderr and stream reasoning to stdout
-  -h              Show this help
+  -i, --input-file <file>          Include file as context (repeatable)
+  -p, --system-prompt <file>       Load system prompt from file
+  -e, --api-endpoint <url>         API base URL (overrides CLI_AI_ENDPOINT)
+  -m, --model-name <model>         Model name (overrides CLI_AI_MODEL)
+  -T, --think                      Enable thinking
+  -x, --exec <command>             Run command and include its stdout/stderr as context
+      --ignore-context-limit       Disable context size limits (default: ${MAX_CONTEXT_LINES} lines / ${MAX_CONTEXT_CHARS} chars)
+  -v, --verbose                    Show processing info on stderr and stream reasoning to stdout
+  -h, --help                       Show this help
 
 Environment:
-  CLI_API_KEY     API key (required)
+  CLI_AI_ENDPOINT   API base URL (required — /chat/completions appended automatically)
+  CLI_AI_MODEL      Model name (required)
+  CLI_AI_API_KEY    API key (optional — omitted if unset)
 
 Examples:
   cat app.log | tail -n10 | $(basename "$0") "what is the most common status code?"
@@ -141,14 +119,16 @@ EOF
     exit 1
 }
 
-ENDPOINT="$DEFAULT_ENDPOINT"
-MODEL="$DEFAULT_MODEL"
+ENDPOINT="${CLI_AI_ENDPOINT:-}"
+MODEL="${CLI_AI_MODEL:-}"
+API_KEY="${CLI_AI_API_KEY:-}"
 SYSTEM_PROMPT="$DEFAULT_SYSTEM_PROMPT"
 SYSTEM_PROMPT_FILE=""
 INPUT_FILES=()
 THINKING=false
 VERBOSE=false
 ENFORCE_LIMIT=true
+EXEC_CMD=""
 
 verbose() {
     if $VERBOSE; then
@@ -156,24 +136,46 @@ verbose() {
     fi
 }
 
-while getopts ":i:s:e:m:TFvh" opt; do
-    case $opt in
-        i) INPUT_FILES+=("$OPTARG") ;;
-        s) SYSTEM_PROMPT_FILE="$OPTARG" ;;
-        e) ENDPOINT="$OPTARG" ;;
-        m) MODEL="$OPTARG" ;;
-        T) THINKING=true ;;
-        F) ENFORCE_LIMIT=false ;;
-        v) VERBOSE=true ;;
-        h) usage ;;
-        :) echo "error: option -$OPTARG requires an argument" >&2; exit 1 ;;
-        \?) echo "error: unknown option -$OPTARG" >&2; usage ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -i|--input-file)
+            INPUT_FILES+=("$2"); shift 2 ;;
+        -p|--system-prompt)
+            SYSTEM_PROMPT_FILE="$2"; shift 2 ;;
+        -e|--api-endpoint)
+            ENDPOINT="$2"; shift 2 ;;
+        -m|--model-name)
+            MODEL="$2"; shift 2 ;;
+        -T|--think)
+            THINKING=true; shift ;;
+        -x|--exec)
+            [[ -z "${2:-}" ]] && { echo "error: -x/--exec requires a command" >&2; exit 1; }
+            EXEC_CMD="$2"; shift 2 ;;
+        --ignore-context-limit)
+            ENFORCE_LIMIT=false; shift ;;
+        -v|--verbose)
+            VERBOSE=true; shift ;;
+        -h|--help)
+            usage; exit 0 ;;
+        --)
+            shift; break ;;
+        -*)
+            echo "error: unknown option $1" >&2; usage ;;
+        *)
+            break ;;
     esac
 done
-shift $((OPTIND - 1))
 
-if [[ -z "${CLI_API_KEY:-}" ]]; then
-    echo "error: CLI_API_KEY environment variable is not set or empty" >&2
+if [[ -z "$ENDPOINT" ]]; then
+    echo "error: CLI_AI_ENDPOINT not set (use -e or set env var)" >&2
+    exit 1
+fi
+
+ENDPOINT="${ENDPOINT%/chat/completions}"
+API_URL="${ENDPOINT}/chat/completions"
+
+if [[ -z "$MODEL" ]]; then
+    echo "error: CLI_AI_MODEL not set (use -m or set env var)" >&2
     exit 1
 fi
 
@@ -198,7 +200,7 @@ CONTEXT=""
 STDIN_CONTENT=""
 
 # Read piped stdin
-if [[ ! -t 0 ]]; then
+if [[ -z "$EXEC_CMD" ]] && [[ ! -t 0 ]]; then
     verbose "reading stdin..."
     STDIN_CONTENT=$(cat)
     if [[ -n "$STDIN_CONTENT" ]]; then
@@ -227,22 +229,48 @@ $file_content
 "
 done
 
+if [[ -n "$EXEC_CMD" ]]; then
+    verbose "executing: $EXEC_CMD"
+    stderr_file=$(mktemp)
+    set +e
+    exec_stdout=$(timeout 30 bash -c "$EXEC_CMD" 2>"$stderr_file")
+    exec_exit=$?
+    set -e
+    exec_stderr=$(<"$stderr_file")
+    rm -f "$stderr_file"
+
+    if [[ "$exec_exit" -eq 124 ]]; then
+        echo "error: command timed out after 30s" >&2
+        exit 1
+    fi
+
+    if [[ -n "$exec_stdout" ]]; then
+        CONTEXT+="<stdout>${exec_stdout}</stdout>"$'\n'
+    fi
+    if [[ -n "$exec_stderr" ]]; then
+        CONTEXT+="<stderr>${exec_stderr}</stderr>"$'\n'
+    fi
+    if [[ "$exec_exit" -ne 0 ]]; then
+        CONTEXT+="<exit-code>${exec_exit}</exit-code>"$'\n'
+    fi
+    CONTEXT+="<source-command>\n${EXEC_CMD}\n</source-command>"$'\n'
+fi
+
 if [[ -n "$CONTEXT" ]]; then
     context_lines=$(count_lines "$CONTEXT")
     context_chars=$(count_chars "$CONTEXT")
     verbose "total context before limit: ${context_lines} lines, ${context_chars} chars"
 
     if $ENFORCE_LIMIT && (( context_lines > MAX_CONTEXT_LINES || context_chars > MAX_CONTEXT_CHARS )); then
-        verbose "context exceeds limit (${MAX_CONTEXT_LINES} lines / ${MAX_CONTEXT_CHARS} chars), truncating..."
-        CONTEXT=$(truncate_context "$CONTEXT")
-        verbose "total context after limit: $(count_lines "$CONTEXT") lines, $(count_chars "$CONTEXT") chars"
+        echo "error: context exceeds limit (${context_lines} lines / ${context_chars} chars; max is ${MAX_CONTEXT_LINES} lines / ${MAX_CONTEXT_CHARS} chars)" >&2
+        exit 1
     fi
 else
     verbose "total context: none"
 fi
 
 USER_MESSAGE="${CONTEXT}${QUESTION}"
-verbose "sending request to $ENDPOINT (model: $MODEL)..."
+verbose "sending request to $API_URL (model: $MODEL)..."
 
 # Build JSON payload; extend with thinking fields only when enabled
 if $THINKING; then
@@ -257,7 +285,6 @@ if $THINKING; then
                 {role: "user",   content: $user}
             ],
             thinking: {type: "enabled"},
-            reasoning_effort: "high",
             stream: true
         }')
 else
@@ -271,16 +298,21 @@ else
                 {role: "system", content: $system},
                 {role: "user",   content: $user}
             ],
-            thinking: {type: "disabled"},
             stream: true
         }')
 fi
 
-curl -sfN \
+# Build auth header array (omitted when no key set)
+AUTH_HEADER=()
+if [[ -n "$API_KEY" ]]; then
+    AUTH_HEADER=(-H "Authorization: Bearer $API_KEY")
+fi
+
+curl -sN \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $CLI_API_KEY" \
+    "${AUTH_HEADER[@]}" \
     -d "$PAYLOAD" \
-    "$ENDPOINT" | stream_response || {
+    "$API_URL" | stream_response || {
     if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
         echo "error: API request failed — check endpoint and key" >&2
     fi
