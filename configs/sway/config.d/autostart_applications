@@ -1,0 +1,22 @@
+# Polkit authentication agent
+exec lxpolkit
+
+# Import environment variables for user systemd service manager
+exec systemctl --user import-environment DISPLAY WAYLAND_DISPLAY SWAYSOCK
+
+# Update dbus environments with display variables
+exec hash dbus-update-activation-environment 2>/dev/null && \
+     dbus-update-activation-environment --systemd DISPLAY WAYLAND_DISPLAY SWAYSOCK
+
+# Idle configuration
+exec swayidle idlehint 1
+exec_always swayidle -w before-sleep "gtklock -d"
+
+# Desktop notifications
+exec mako --config /etc/mako/config
+
+# Start foot server
+exec_always --no-startup-id foot --server
+
+# Autotiling
+exec autotiling

@@ -1,4 +1,0 @@
-#!/bin/bash
-
-echo "$(brightnessctl info | grep -Eo '[0-9]+%')"
-
