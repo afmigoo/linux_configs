@@ -1,0 +1,10 @@
+#!/bin/bash
+set -e
+
+cd "$(dirname "$0")/.."
+
+mkdir -p ~/.local/bin ~/.local/share/druid/art
+
+cp bin/druid-greet bin/druid-greet-sysinfo ~/.local/bin/
+cp visual/ascii/ascii_text.tpl ~/.local/share/druid/
+cp visual/ascii/ascii_flower.txt visual/ascii/ascii_lstr_s.txt ~/.local/share/druid/art/
