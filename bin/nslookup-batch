@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Usage:
+#   nslookup-batch "foo.com,bar.com,baz.com"   # arg1: comma-separated domains
+#   printf "foo.com\nbar.com\nbaz.com\n" | nslookup-batch   # stdin: one domain per line
+#
+# Output:
+#   foo.com: 1.2.3.4,5.6.7.8
+#   bar.com: (no A record)
+
+set -euo pipefail
+
+process_domain() {
+  local domain="$1"
+  [[ -z "$domain" ]] && return
+
+  # Trim leading/trailing whitespace
+  domain="${domain#"${domain%%[![:space:]]*}"}"
+  domain="${domain%"${domain##*[![:space:]]}"}"
+  [[ -z "$domain" ]] && return
+
+  ips=$(dig +short A "$domain" | paste -sd, -)
+
+  if [[ -n "$ips" ]]; then
+    echo "$domain: $ips"
+  else
+    echo "$domain: (no A record)"
+  fi
+}
+
+if [[ $# -ge 1 && -n "${1:-}" ]]; then
+  # First arg format: foo.com,bar.com,baz.com
+  IFS=',' read -r -a domains <<< "$1"
+  for domain in "${domains[@]}"; do
+    process_domain "$domain"
+  done
+else
+  while IFS= read -r domain; do
+    process_domain "$domain"
+  done
+fi

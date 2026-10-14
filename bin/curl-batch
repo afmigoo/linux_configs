@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ip=""
+domains_arg=""
+timeout=10
+probes_arg="https"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --resolveas) ip="${2:-}"; shift 2 ;;
+    --timeout)   timeout="${2:-10}"; shift 2 ;;
+    --probes)    probes_arg="${2:-https}"; shift 2 ;;
+    -h|--help)
+      echo "Usage: $0 [--resolveas <ip>] [--timeout <sec>] [--probes http,https] [foo.com,bar.com]"
+      echo "   or: cat domains.txt | $0 [--resolveas <ip>] [--probes http,https]"
+      echo "Default probes: https"
+      exit 0
+      ;;
+    *) domains_arg="$1"; shift ;;
+  esac
+done
+
+# Parse probes list
+IFS=',' read -r -a probes <<< "$probes_arg"
+((${#probes[@]} > 0)) || probes=("https")
+
+# Validate probes
+for p in "${probes[@]}"; do
+  p="${p#"${p%%[![:space:]]*}"}"
+  p="${p%"${p##*[![:space:]]}"}"
+  case "$p" in
+    http|https) ;;
+    *) echo "error: unsupported probe '$p' (allowed: http,https)"; exit 1 ;;
+  esac
+done
+
+process_domain() {
+  local d="$1"
+  d="${d#"${d%%[![:space:]]*}"}"
+  d="${d%"${d##*[![:space:]]}"}"
+  [[ -z "$d" ]] && return
+
+  for scheme in "${probes[@]}"; do
+    local port=80
+    [[ "$scheme" == "https" ]] && port=443
+
+    local -a curl_args=(
+      -sS -o /dev/null -L
+      --max-time "$timeout"
+      -w "$scheme://$d${ip:+ ($ip)} -> HTTP %{http_code}, remote %{remote_ip}\n"
+    )
+
+    [[ -n "$ip" ]] && curl_args+=(--resolve "$d:$port:$ip")
+
+    curl "${curl_args[@]}" "$scheme://$d" \
+      || echo "$scheme://$d${ip:+ ($ip)} -> request failed"
+  done
+}
+
+if [[ -n "$domains_arg" ]]; then
+  IFS=',' read -r -a domains <<< "$domains_arg"
+  for d in "${domains[@]}"; do process_domain "$d"; done
+else
+  while IFS= read -r d; do process_domain "$d"; done
+fi
